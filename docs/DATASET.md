@@ -8,6 +8,8 @@ Execution time depends on CPU, OS, compiler version, compiler flags, power manag
 
 A machine-readable manifest is provided at `data/benchmark_manifest.csv`. The measured runtime dataset is created by `python run.py collect`; any existing CSV artifact is machine-specific and must not be represented as portable. Collection overwrites `data/experiments.csv`, so back it up first when preserving history matters.
 
+`data/demo_feedback.csv` contains hypothetical, schema-shaped examples for demonstrating the dashboard. They are explicitly labelled `DEMO — NOT MEASURED`, are not benchmark results, and are read only by the Feedback display when its demo toggle is enabled. The CLI pipeline reads `experiments.csv` and `feedback.csv` by their configured paths; it does not include demo data in training, evaluation, or feedback incorporation.
+
 ## Standard dataset extension: PolyBench/C
 PolyBench/C 4.2.1 is a public suite of 30 numerical kernels. See the upstream repository and license: https://github.com/MatthiasJReisinger/PolyBenchC-4.2.1 . This project does not redistribute the full suite. Download it separately, review its license, then adapt kernels that compile as standalone programs or add an adapter for the PolyBench utilities. Do not simply copy PolyBench source files into `benchmarks/` without preserving required headers, utility code, and license notices.
 

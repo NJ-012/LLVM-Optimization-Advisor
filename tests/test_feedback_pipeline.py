@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 import pandas as pd
 from sklearn.dummy import DummyRegressor
+from sklearn.dummy import DummyRegressor
 
 from src import model, pipeline
 from src import benchmarks
@@ -175,9 +176,15 @@ class PipelineTests(unittest.TestCase):
             folder = Path(temporary)
             feedback_path = folder / "feedback.csv"
             experiments_path = folder / "experiments.csv"
+            demo_path = folder / "demo_feedback.csv"
             pd.DataFrame([feedback_row("O3_no_vectorize")]).to_csv(
                 feedback_path, index=False
             )
+            demo = feedback_row("O2", context="demo-only")
+            demo["program_id"] = "dot_product"
+            demo["measurement_source"] = "demo"
+            pd.DataFrame([demo]).to_csv(demo_path, index=False)
+            original_feedback = feedback_path.read_bytes()
             with patch.object(pipeline, "FEEDBACK", feedback_path), patch.object(
                 pipeline, "EXPERIMENTS", experiments_path
             ):
@@ -186,6 +193,9 @@ class PipelineTests(unittest.TestCase):
             experiments = pd.read_csv(experiments_path)
             self.assertEqual(len(experiments), 1)
             self.assertEqual(experiments.iloc[0]["measurement_source"], "feedback")
+            self.assertEqual(experiments.iloc[0]["program_id"], "array_sum")
+            self.assertEqual(feedback_path.read_bytes(), original_feedback)
+            self.assertTrue(demo_path.exists())
 
     def test_run_all_is_repeatable_and_never_generates_fresh_feedback(self):
         with (
@@ -246,6 +256,42 @@ class ModelEvaluationTests(unittest.TestCase):
         self.assertEqual(report["folds"], 5)
         self.assertGreaterEqual(report["group_cv_median_baseline_log_speedup_mae"], 0)
         self.assertGreaterEqual(report["group_cv_log_speedup_mae"], 0)
+
+    def test_training_uses_experiment_csv_not_neighboring_demo_feedback(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            folder = Path(temporary)
+            experiments_path = folder / "experiments.csv"
+            demo_path = folder / "demo_feedback.csv"
+            model_path = folder / "reward_model.joblib"
+            rows = []
+            for program in ("p1", "p2", "p3"):
+                row = {
+                    "program_id": program,
+                    "configuration": "O3",
+                    "baseline_o3_seconds": 0.01,
+                    "runtime_seconds": 0.01,
+                    "speedup_vs_o3": 1.0,
+                    "correctness": True,
+                }
+                row.update({feature: 1 for feature in FEATURES})
+                rows.append(row)
+            pd.DataFrame(rows).to_csv(experiments_path, index=False)
+            pd.DataFrame([{"program_id": "demo-only"}]).to_csv(
+                demo_path, index=False
+            )
+            with (
+                patch.object(model, "EXPERIMENTS", experiments_path),
+                patch.object(model, "MODEL", model_path),
+                patch.object(
+                    model,
+                    "_new_model",
+                    return_value=DummyRegressor(strategy="mean"),
+                ),
+            ):
+                bundle = model.train()
+            self.assertEqual(bundle["trained_rows"], 3)
+            self.assertEqual(set(bundle["programs"]), {"p1", "p2", "p3"})
+            self.assertTrue(demo_path.exists())
 
 
 if __name__ == "__main__":

@@ -1,17 +1,28 @@
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import pandas as pd
 
 from src.dashboard_data import (
+    FEEDBACK_COLLECTION_COMMAND,
     calculate_measured_speedup,
     correctness_status,
+    filter_feedback_history,
     filter_observations,
     measurement_source,
+    prepare_demo_feedback,
+    prepare_feedback_history,
     prepare_chart_data,
 )
-from src.data_validation import append_unseen_measurements, combine_chart_sources, measurement_fingerprint, validate_measurements
-from src.config import CONFIGS, EXPERIMENTS, FEEDBACK
+from src.data_validation import (
+    FEEDBACK_COLUMNS,
+    append_unseen_measurements,
+    combine_chart_sources,
+    measurement_fingerprint,
+    validate_measurements,
+)
+from src.config import CONFIGS, EXPERIMENTS, FEEDBACK, FEATURES
 from src.benchmarks import calculate_speedup, compile_one, compile_reference, outputs_match
 from src.recommendation import choose_action, use_safe_fallback
 
@@ -111,6 +122,76 @@ class DashboardDataTests(unittest.TestCase):
         self.assertEqual(correctness_status(None), "Unknown")
         self.assertEqual(measurement_source("feedback-run"), "feedback")
         self.assertEqual(measurement_source("clang 18.1.3"), "collection")
+
+    def test_feedback_empty_state_has_exact_real_collection_command(self):
+        history = prepare_feedback_history(pd.DataFrame(), pd.DataFrame())
+        self.assertTrue(history.empty)
+        self.assertEqual(
+            FEEDBACK_COLLECTION_COMMAND,
+            "python run.py feedback --benchmark matrix_multiply",
+        )
+
+    def test_feedback_history_marks_validation_and_preserves_input_csv(self):
+        import tempfile
+        from pathlib import Path
+
+        real = pd.DataFrame(
+            [
+                {
+                    "timestamp": "2026-10-12 08:00:00",
+                    "program_id": "matrix_multiply",
+                    "configuration": "O3",
+                    "baseline_o3_seconds": 0.01,
+                    "runtime_seconds": 0.01,
+                    "speedup_vs_o3": 1.0,
+                    "correctness": True,
+                    "iteration": 1,
+                    "predicted_speedup": 1.0,
+                    **{feature: 1 for feature in FEATURES},
+                }
+            ]
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "feedback.csv"
+            real.to_csv(source, index=False)
+            original = source.read_bytes()
+            history = prepare_feedback_history(real, pd.DataFrame())
+            self.assertEqual(source.read_bytes(), original)
+        self.assertEqual(history["validation_status"].tolist(), ["Rejected"])
+        self.assertIn("measurement_context_id is required", history.iloc[0]["validation_reason"])
+
+    def test_demo_records_are_separately_marked_and_filterable(self):
+        demo = pd.DataFrame(
+            [
+                {
+                    "program_id": "dot_product",
+                    "configuration": "O2",
+                    "runtime_seconds": 0.008,
+                }
+            ]
+        )
+        marked = prepare_demo_feedback(demo)
+        self.assertEqual(marked.iloc[0]["record_label"], "DEMO — NOT MEASURED")
+        self.assertEqual(marked.iloc[0]["validation_status"], "DEMO — NOT MEASURED")
+        filtered = filter_feedback_history(
+            marked,
+            query="not measured",
+            benchmarks=["dot_product"],
+            configurations=["O2"],
+            validation_statuses=["DEMO — NOT MEASURED"],
+        )
+        self.assertEqual(len(filtered), 1)
+        self.assertNotIn("record_kind", demo.columns)
+
+    def test_shipped_demo_csv_is_schema_shaped_and_does_not_claim_correctness(self):
+        demo_path = Path(__file__).resolve().parents[1] / "data" / "demo_feedback.csv"
+        demo = pd.read_csv(demo_path)
+        self.assertTrue(FEEDBACK_COLUMNS.issubset(demo.columns))
+        self.assertEqual(len(demo), 3)
+        self.assertTrue(demo["demo_label"].eq("DEMO — NOT MEASURED").all())
+        self.assertTrue(demo["measurement_source"].eq("demo").all())
+        self.assertTrue(demo["correctness"].eq("Not tested (demo)").all())
+        self.assertTrue(demo["configuration"].isin(CONFIGS).all())
 
     def test_chart_keeps_sources_separate_and_does_not_pool_benchmarks(self):
         collection = prepare_chart_data(self.experiments, "array_sum", "collection")

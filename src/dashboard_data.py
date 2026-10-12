@@ -3,6 +3,11 @@ from typing import Iterable
 
 import pandas as pd
 
+from .data_validation import feedback_quarantine_rows
+
+
+FEEDBACK_COLLECTION_COMMAND = "python run.py feedback --benchmark matrix_multiply"
+
 
 _TRUE_VALUES = {"true", "1", "yes", "pass", "passed"}
 _FALSE_VALUES = {"false", "0", "no", "fail", "failed"}
@@ -66,6 +71,92 @@ def filter_observations(
         filtered = filtered[filtered["llvm_version"].astype(str).eq(compiler)]
     if platform and "platform" in filtered:
         filtered = filtered[filtered["platform"].astype(str).eq(platform)]
+    return filtered.copy()
+
+
+def prepare_feedback_history(
+    feedback: pd.DataFrame,
+    quarantined: pd.DataFrame,
+) -> pd.DataFrame:
+    """Annotate real feedback and quarantined rows for display without changing inputs."""
+    frames = []
+    if not feedback.empty:
+        rejected, reasons = feedback_quarantine_rows(feedback)
+        active = feedback.copy()
+        active["record_kind"] = "Real"
+        active["validation_status"] = [
+            "Rejected" if index in rejected else "Valid" for index in active.index
+        ]
+        active["validation_reason"] = [
+            reasons.get(index, "") for index in active.index
+        ]
+        active["record_label"] = "REAL FEEDBACK"
+        frames.append(active)
+
+    if not quarantined.empty:
+        archived = quarantined.copy()
+        archived["record_kind"] = "Quarantined"
+        archived["validation_status"] = "Quarantined"
+        if "quarantine_reason" in archived:
+            reasons = archived["quarantine_reason"].fillna("").astype(str)
+        else:
+            reasons = pd.Series("", index=archived.index)
+        archived["validation_reason"] = reasons.where(
+            reasons.str.strip().ne(""),
+            "Quarantined; no detailed validation reason was stored.",
+        )
+        archived["record_label"] = "REAL FEEDBACK · QUARANTINED"
+        frames.append(archived)
+
+    if not frames:
+        return pd.DataFrame(
+            columns=[
+                "record_kind",
+                "validation_status",
+                "validation_reason",
+                "record_label",
+            ]
+        )
+    return pd.concat(frames, ignore_index=True, sort=False)
+
+
+def prepare_demo_feedback(demo_feedback: pd.DataFrame) -> pd.DataFrame:
+    """Mark illustrative data for display; this data is never validated as measured."""
+    if demo_feedback.empty:
+        return demo_feedback.copy()
+    demo = demo_feedback.copy()
+    demo["record_kind"] = "Demo"
+    demo["validation_status"] = "DEMO — NOT MEASURED"
+    demo["validation_reason"] = (
+        "Hypothetical demonstration values; not produced by a benchmark run."
+    )
+    demo["record_label"] = "DEMO — NOT MEASURED"
+    return demo
+
+
+def filter_feedback_history(
+    history: pd.DataFrame,
+    *,
+    query: str = "",
+    benchmarks: Iterable[str] | None = None,
+    configurations: Iterable[str] | None = None,
+    validation_statuses: Iterable[str] | None = None,
+) -> pd.DataFrame:
+    filtered = history
+    if benchmarks is not None and "program_id" in filtered:
+        filtered = filtered[filtered["program_id"].astype(str).isin(set(benchmarks))]
+    if configurations is not None and "configuration" in filtered:
+        filtered = filtered[filtered["configuration"].astype(str).isin(set(configurations))]
+    if validation_statuses is not None and "validation_status" in filtered:
+        filtered = filtered[
+            filtered["validation_status"].astype(str).isin(set(validation_statuses))
+        ]
+    if query.strip():
+        searchable = filtered.astype("string").fillna("")
+        matches = searchable.apply(
+            lambda column: column.str.contains(query.strip(), case=False, regex=False)
+        ).any(axis=1)
+        filtered = filtered[matches]
     return filtered.copy()
 
 

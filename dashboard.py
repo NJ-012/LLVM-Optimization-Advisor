@@ -5,14 +5,25 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
-from src.config import CONFIGS, EXPERIMENTS, FEATURES, FEEDBACK, MODEL
+from src.config import (
+    CONFIGS,
+    EXPERIMENTS,
+    FEATURES,
+    FEEDBACK,
+    FEEDBACK_QUARANTINE,
+    MODEL,
+)
 from src.data_validation import combine_chart_sources, measurement_fingerprint, validate_measurements
 from src.recommendation import use_safe_fallback
 from src.dashboard_data import (
     calculate_measured_speedup,
     correctness_status,
+    FEEDBACK_COLLECTION_COMMAND,
+    filter_feedback_history,
     filter_observations,
     measurement_source,
+    prepare_demo_feedback,
+    prepare_feedback_history,
     prepare_chart_data,
 )
 
@@ -36,6 +47,8 @@ def read_csv(path: str) -> pd.DataFrame:
 
 experiments = read_csv(str(DATA_DIR / EXPERIMENTS.name))
 feedback = read_csv(str(DATA_DIR / FEEDBACK.name))
+quarantined_feedback = read_csv(str(DATA_DIR / FEEDBACK_QUARANTINE.name))
+demo_feedback = read_csv(str(DATA_DIR / "demo_feedback.csv"))
 for frame, name in ((experiments, "experiments"), (feedback, "feedback")):
     if not frame.empty:
         issues = validate_measurements(frame, name)
@@ -472,11 +485,215 @@ with tabs[3]:
 
 with tabs[4]:
     st.subheader("Feedback")
-    st.caption("Feedback measurements are shown separately from the collection batch.")
-    if filtered_feedback.empty:
-        st.info("No feedback observations match the current filters.")
+    st.caption(
+        "Measured speedup is calculated from the recorded O3 baseline and candidate runtime. "
+        "Predicted speedup is only a model estimate and is never a feedback measurement."
+    )
+    if st.button("Refresh feedback data"):
+        st.cache_data.clear()
+        st.rerun()
+
+    real_history = prepare_feedback_history(feedback, quarantined_feedback)
+    show_demo = st.toggle("Show illustrative demo data", value=False)
+    display_history = real_history
+    if show_demo:
+        display_history = pd.concat(
+            [real_history, prepare_demo_feedback(demo_feedback)],
+            ignore_index=True,
+            sort=False,
+        )
+        st.warning(
+            "Demo rows are hypothetical examples only: their runtimes and speedups were "
+            "not measured, their prediction values are not model outputs, and correctness "
+            "was not tested. They are excluded from training, evaluation, feedback "
+            "incorporation, and measured-performance charts."
+        )
+
+    valid_count = int(real_history["validation_status"].eq("Valid").sum())
+    rejected_count = int(
+        real_history["validation_status"].isin(["Rejected", "Quarantined"]).sum()
+    )
+    summary = st.columns(4)
+    summary[0].metric("Total real observations", len(real_history))
+    summary[1].metric("Valid observations", valid_count)
+    summary[2].metric("Rejected / quarantined", rejected_count)
+
+    st.markdown("#### Feedback history")
+    st.caption(
+        "A recommendation's predicted speedup is an estimate captured at selection time; "
+        "the measured speedup below is an observation, and rejected rows are not accepted "
+        "as valid performance evidence."
+    )
+    control_columns = st.columns([2, 1, 1, 1])
+    search = control_columns[0].text_input(
+        "Search feedback",
+        placeholder="Search benchmark, compiler, reason, or context",
+    )
+    available_benchmarks = sorted(
+        display_history.get("program_id", pd.Series(dtype=str))
+        .dropna()
+        .astype(str)
+        .unique()
+    )
+    chosen_benchmarks = control_columns[1].multiselect(
+        "Benchmarks", available_benchmarks, default=available_benchmarks
+    )
+    available_configs = sorted(
+        display_history.get("configuration", pd.Series(dtype=str))
+        .dropna()
+        .astype(str)
+        .unique()
+    )
+    chosen_configs = control_columns[2].multiselect(
+        "Configurations", available_configs, default=available_configs
+    )
+    available_statuses = sorted(
+        display_history.get("validation_status", pd.Series(dtype=str))
+        .dropna()
+        .astype(str)
+        .unique()
+    )
+    chosen_statuses = control_columns[3].multiselect(
+        "Validation status", available_statuses, default=available_statuses
+    )
+    history = filter_feedback_history(
+        display_history,
+        query=search,
+        benchmarks=chosen_benchmarks,
+        configurations=chosen_configs,
+        validation_statuses=chosen_statuses,
+    )
+    summary[3].metric(
+        "Demo records currently displayed",
+        int(history["record_kind"].eq("Demo").sum())
+        if "record_kind" in history
+        else 0,
+    )
+
+    if real_history.empty:
+        st.info(
+            "No real feedback observations are recorded yet. Generate one with "
+            f"`{FEEDBACK_COLLECTION_COMMAND}`."
+        )
+    elif history.empty:
+        st.info("No feedback records match the current search and filters.")
+
+    if not history.empty:
+        visible = pd.DataFrame(index=history.index)
+        visible["Record"] = history["record_label"]
+        visible["Benchmark"] = history.get("program_id")
+        visible["Compiler configuration"] = history.get("configuration")
+        visible["Candidate runtime (s)"] = history.get("runtime_seconds")
+        visible["O3 runtime (s)"] = history.get("baseline_o3_seconds")
+        visible["Speedup vs O3 (measured / hypothetical)"] = history.get(
+            "speedup_vs_o3"
+        )
+        visible["Predicted speedup (model estimate)"] = history.get(
+            "predicted_speedup"
+        )
+        visible["Correctness"] = (
+            history["correctness"].map(correctness_status)
+            if "correctness" in history
+            else "Unknown"
+        )
+        visible["Validation status"] = history["validation_status"]
+        visible["Validation / demo note"] = history["validation_reason"]
+        visible["Measurement date"] = history.get("timestamp")
+        st.dataframe(visible, width="stretch", hide_index=True)
+        with st.expander("Feedback provenance and validation details"):
+            detail_columns = [
+                column
+                for column in (
+                    "record_label",
+                    "measurement_context_id",
+                    "llvm_version",
+                    "compiler_flags",
+                    "baseline_compiler_flags",
+                    "platform",
+                    "input_profile",
+                    "measurement_repeats",
+                    "baseline_mad_seconds",
+                    "runtime_mad_seconds",
+                    "validation_reason",
+                )
+                if column in history
+            ]
+            st.dataframe(history[detail_columns], width="stretch", hide_index=True)
     else:
-        feedback_fingerprints = set(measurement_fingerprint(filtered_feedback))
+        st.info(
+            "Try clearing the search or selecting additional benchmarks, configurations, "
+            "or validation statuses."
+        )
+
+    st.markdown("#### Candidate runtime vs O3 baseline")
+    chart_rows = history[
+        history["record_kind"].eq("Real")
+        & history["validation_status"].eq("Valid")
+    ].copy() if not history.empty else pd.DataFrame()
+    if chart_rows.empty:
+        st.info(
+            "No valid real feedback runtimes match these filters. Demo and quarantined "
+            "records are intentionally excluded from this measured-runtime comparison."
+        )
+    else:
+        chart_rows["comparison_label"] = (
+            chart_rows["program_id"].astype(str)
+            + " · "
+            + chart_rows["configuration"].astype(str)
+            + " · "
+            + chart_rows["timestamp"].astype(str)
+        )
+        runtime_chart = chart_rows.melt(
+            id_vars=["comparison_label", "program_id", "configuration", "timestamp"],
+            value_vars=["baseline_o3_seconds", "runtime_seconds"],
+            var_name="runtime_kind",
+            value_name="plotted_runtime_seconds",
+        )
+        runtime_chart["runtime_kind"] = runtime_chart["runtime_kind"].map(
+            {
+                "baseline_o3_seconds": "O3 baseline",
+                "runtime_seconds": "Candidate",
+            }
+        )
+        runtime_plot = alt.Chart(runtime_chart).mark_bar().encode(
+            x=alt.X(
+                "plotted_runtime_seconds:Q",
+                title="Runtime (seconds; actual feedback only)",
+                scale=alt.Scale(zero=True),
+            ),
+            y=alt.Y("comparison_label:N", title="Feedback observation", sort=None),
+            color=alt.Color("runtime_kind:N", title="Runtime"),
+            yOffset="runtime_kind:N",
+            tooltip=[
+                alt.Tooltip("program_id:N", title="Benchmark"),
+                alt.Tooltip("configuration:N", title="Candidate configuration"),
+                alt.Tooltip("runtime_kind:N", title="Runtime"),
+                alt.Tooltip(
+                    "plotted_runtime_seconds:Q",
+                    title="Runtime (s)",
+                    format=".6f",
+                ),
+                alt.Tooltip("timestamp:N", title="Measurement date"),
+            ],
+        )
+        st.altair_chart(
+            runtime_plot.properties(
+                height=max(150, 42 * len(chart_rows)),
+                background="#182438" if dark_theme else "#ffffff",
+            ).configure_axis(
+                labelColor="#e5e7eb" if dark_theme else "#263445",
+                titleColor="#e5e7eb" if dark_theme else "#263445",
+                gridColor="#64748b55",
+            ).configure_view(strokeOpacity=0),
+            width="stretch",
+        )
+        st.caption(
+            "This chart uses valid real feedback records only. The candidate and O3 runtimes "
+            "are measured observations; predicted speedup is not plotted."
+        )
+
+    if not real_history.empty:
+        feedback_fingerprints = set(measurement_fingerprint(feedback)) if not feedback.empty else set()
         experiment_fingerprints = (
             set(measurement_fingerprint(experiments))
             if not experiments.empty
@@ -484,8 +701,8 @@ with tabs[4]:
         )
         incorporated_count = len(feedback_fingerprints & experiment_fingerprints)
         st.write(
-            f"**Recorded feedback observations:** {len(filtered_feedback)} · "
-            f"**Matching experiment records:** {incorporated_count}"
+            f"**Matching experiment records:** {incorporated_count} · "
+            "incorporation is separate from recording feedback."
         )
     if MODEL_FILE.exists():
         try:
@@ -508,41 +725,3 @@ with tabs[4]:
                 st.info("Experiment data has changed since this model was trained; retrain to incorporate it.")
     else:
         st.info("No trained model is available. Recorded feedback has not affected model predictions.")
-    show_table(
-        filtered_feedback,
-        [
-            "timestamp",
-            "program_id",
-            "configuration",
-            "predicted_speedup",
-            "baseline_o3_seconds",
-            "runtime_seconds",
-            "speedup_vs_o3",
-            "correctness",
-            "iteration",
-        ],
-        "feedback records",
-    )
-    if not filtered_feedback.empty:
-        with st.expander("Feedback measurement context and variability"):
-            context_columns = [
-                column
-                for column in (
-                    "measurement_context_id",
-                    "llvm_version",
-                    "compiler_flags",
-                    "baseline_compiler_flags",
-                    "platform",
-                    "input_profile",
-                    "measurement_repeats",
-                    "baseline_mad_seconds",
-                    "runtime_mad_seconds",
-                )
-                if column in filtered_feedback
-            ]
-            if context_columns:
-                st.dataframe(filtered_feedback[context_columns], use_container_width=True)
-            else:
-                st.warning(
-                    "These legacy feedback records do not identify a complete measurement context."
-                )
