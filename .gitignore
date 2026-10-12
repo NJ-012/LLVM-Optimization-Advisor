@@ -1,0 +1,40 @@
+﻿# Python environments
+.venv/
+.venv-*/
+venv/
+env/
+
+# Python cache and test artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+.streamlit/secrets.toml
+
+# Editors and operating systems
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Compiled artifacts
+*.o
+*.obj
+*.so
+*.dll
+*.exe
+*.out
+
+# Temporary files
+*.log
+*.tmp
+
+# Build artifacts
+build/
+dist/

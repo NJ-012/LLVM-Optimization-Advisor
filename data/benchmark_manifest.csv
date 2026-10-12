@@ -1,0 +1,12 @@
+program_id,description,workload_characteristics,source_file,source_type
+array_sum,Sequential reduction,memory + arithmetic,benchmarks/array_sum.c,project benchmark kernel
+array_transform,Element-wise array transform,vectorizable arithmetic,benchmarks/array_transform.c,project benchmark kernel
+branchy,Branch-heavy integer loop,control flow,benchmarks/branchy.c,project benchmark kernel
+conditional_count,Conditional counting,control flow + arithmetic,benchmarks/conditional_count.c,project benchmark kernel
+dot_product,Dot product,reduction + floating point,benchmarks/dot_product.c,project benchmark kernel
+loop_reduction,Integer loop reduction,loop + integer arithmetic,benchmarks/loop_reduction.c,project benchmark kernel
+matrix_multiply,Matrix multiplication,nested loops + memory locality,benchmarks/matrix_multiply.c,project benchmark kernel
+matrix_transpose,Matrix transpose,memory access pattern,benchmarks/matrix_transpose.c,project benchmark kernel
+prefix_sum,Prefix sum,loop-carried dependency,benchmarks/prefix_sum.c,project benchmark kernel
+stencil_1d,One-dimensional stencil,nested time/space loops + memory,benchmarks/stencil_1d.c,project benchmark kernel
+weighted_sum,Weighted sum,floating point + reduction,benchmarks/weighted_sum.c,project benchmark kernel
